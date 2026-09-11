@@ -191,13 +191,41 @@ function showFavTip(t) {
   favTipTimer = setTimeout(() => (favTip.value = ''), 2500)
 }
 
+// 刷新收藏列表; 网络异常时保留当前列表并返回 false (不抛异常), 由调用方决定是否重试
 async function loadFavorites() {
-  favorites.value = await fetchJson('/api/favorites')
+  try {
+    favorites.value = await fetchJson('/api/favorites')
+    return true
+  } catch (e) {
+    return false
+  }
+}
+
+// 网络异常后的列表对齐: 写请求结果未知(请求可能已到达服务器并被处理),
+// 间隔重试拉取列表, 使界面最终与服务器状态一致; 返回是否同步成功
+let reconciling = false
+async function reconcileFavorites(retries = 5) {
+  if (reconciling) return false
+  reconciling = true
+  try {
+    for (let i = 0; i < retries; i++) {
+      await new Promise(r => setTimeout(r, 2000))
+      if (await loadFavorites()) return true
+    }
+    return false
+  } finally {
+    reconciling = false
+  }
+}
+
+// 刷新收藏列表; 失败时后台重试, 网络恢复后自动与服务器对齐
+async function syncFavorites() {
+  if (!await loadFavorites()) await reconcileFavorites()
 }
 
 function toggleFavPanel() {
   favPanelOpen.value = !favPanelOpen.value
-  if (favPanelOpen.value) loadFavorites()
+  if (favPanelOpen.value) syncFavorites()
 }
 
 // 当前工具栏的查询条件组合, 即收藏保存的内容
@@ -223,7 +251,7 @@ async function saveFavorite() {
     if (r.ok) {
       favName.value = ''
       showFavTip(`已保存「${name}」`)
-      await loadFavorites()
+      await syncFavorites()
     } else if (r.status === 409) {
       showFavTip('名称已存在, 请换一个')
     } else {
@@ -274,14 +302,14 @@ async function renameFavorite(f) {
     if (r.ok) {
       cancelRename()
       showFavTip(`已改名为「${name}」`)
-      await loadFavorites()
+      await syncFavorites()
     } else if (r.status === 409) {
       editError.value = '名称已存在, 请换一个'
     } else if (r.status === 404) {
       // 收藏已被其他人删除: 关闭编辑框并刷新列表
       cancelRename()
       showFavTip('该收藏已不存在, 列表已刷新')
-      await loadFavorites()
+      await syncFavorites()
     } else {
       editError.value = '改名失败, 请稍后重试'
     }
@@ -303,10 +331,20 @@ async function removeFavorite(f) {
     } else {
       showFavTip('删除失败, 请稍后重试')
     }
+    await syncFavorites()
   } catch (e) {
-    showFavTip('网络异常, 删除未生效')
+    // 网络异常时删除结果未知: 请求可能已到达服务器并被处理, 只是响应丢失。
+    // 重试同步列表, 网络恢复后界面自动与服务器对齐, 无需手动刷新页面
+    showFavTip('网络异常, 删除结果未知, 正在重试同步…')
+    const synced = await reconcileFavorites()
+    if (!synced) {
+      showFavTip('网络未恢复, 列表可能不是最新, 恢复后将自动同步')
+    } else if (favorites.value.some(x => x.id === f.id)) {
+      showFavTip('删除未生效, 请稍后重试')
+    } else {
+      showFavTip(`已删除「${f.name}」`)
+    }
   }
-  await loadFavorites()
 }
 
 // 收藏条目的摘要: 指标集 · 时间范围 · 聚合方式
@@ -480,7 +518,9 @@ onMounted(async () => {
   await loadMetrics()
   await onQuery()
   scheduleLive()
-  loadFavorites()
+  syncFavorites()
+  // 网络恢复后自动同步收藏列表 (覆盖重试窗口之外的长时间断网)
+  window.addEventListener('online', syncFavorites)
   // 指标列表每 10 秒刷新一次统计
   setInterval(loadMetrics, 10000)
 })
@@ -489,5 +529,6 @@ onBeforeUnmount(() => {
   clearInterval(liveTimer)
   clearInterval(liveAnomalyTimer)
   clearTimeout(favTipTimer)
+  window.removeEventListener('online', syncFavorites)
 })
 </script>
