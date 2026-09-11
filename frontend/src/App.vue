@@ -49,6 +49,37 @@
       <div class="group">
         <button :class="{ active: live }" @click="toggleLive">{{ live ? '暂停实时' : '开启实时' }}</button>
         <button class="primary" @click="onQuery">刷新查询</button>
+        <button :class="{ active: favPanelOpen }" @click="toggleFavPanel">★ 收藏</button>
+      </div>
+    </div>
+
+    <div v-if="favPanelOpen" class="fav-panel">
+      <div class="fav-save">
+        <input
+          v-model="favName"
+          placeholder="收藏名称, 如: 张三-6小时CPU平均"
+          maxlength="64"
+          @keyup.enter="saveFavorite"
+        />
+        <button class="primary" @click="saveFavorite">保存当前查询</button>
+        <span v-if="favTip" class="fav-tip">{{ favTip }}</span>
+      </div>
+      <div v-if="!favorites.length" class="fav-empty">暂无收藏, 配置好查询条件后点击「保存当前查询」</div>
+      <div v-for="f in favorites" :key="f.id" class="fav-item">
+        <div v-if="editingId === f.id" class="fav-edit">
+          <input v-model="editingName" maxlength="64" @keyup.enter="renameFavorite(f)" @keyup.esc="editingId = null" />
+          <button @click="renameFavorite(f)">确定</button>
+          <button @click="editingId = null">取消</button>
+        </div>
+        <template v-else>
+          <span class="fav-name">{{ f.name }}</span>
+          <span class="fav-desc">{{ favSummary(f) }}</span>
+          <span class="fav-ops">
+            <button @click="applyFavorite(f)">应用</button>
+            <button @click="startRename(f)">改名</button>
+            <button class="danger" @click="removeFavorite(f)">删除</button>
+          </span>
+        </template>
       </div>
     </div>
 
@@ -134,6 +165,104 @@ function toggleMetric(m) {
 function setRange(s) { rangeSec.value = s; onQuery() }
 function setAgg(a) { agg.value = a; onQuery() }
 function toggleLive() { live.value = !live.value; scheduleLive() }
+
+// ---------- 查询条件收藏: 保存当前组合 / 一键恢复 / 改名 / 删除 ----------
+const favorites = ref([])
+const favPanelOpen = ref(false)
+const favName = ref('')
+const favTip = ref('')
+const editingId = ref(null)
+const editingName = ref('')
+let favTipTimer = null
+
+function showFavTip(t) {
+  favTip.value = t
+  clearTimeout(favTipTimer)
+  favTipTimer = setTimeout(() => (favTip.value = ''), 2500)
+}
+
+async function loadFavorites() {
+  favorites.value = await fetchJson('/api/favorites')
+}
+
+function toggleFavPanel() {
+  favPanelOpen.value = !favPanelOpen.value
+  if (favPanelOpen.value) loadFavorites()
+}
+
+// 当前工具栏的查询条件组合, 即收藏保存的内容
+function currentConfig() {
+  return {
+    instance: instance.value,
+    metrics: [...selected.value],
+    range_sec: rangeSec.value,
+    agg: agg.value,
+  }
+}
+
+async function saveFavorite() {
+  const name = favName.value.trim()
+  if (!name) { showFavTip('请输入收藏名称'); return }
+  const r = await fetch(API + '/api/favorites', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, config: currentConfig() }),
+  })
+  if (r.status === 409) { showFavTip('名称已存在, 请换一个'); return }
+  if (!r.ok) { showFavTip('保存失败'); return }
+  favName.value = ''
+  showFavTip(`已保存「${name}」`)
+  await loadFavorites()
+}
+
+// 一键恢复: 回填工具栏条件并触发查询 (实时轮询定时器引用的是 ref, 自动跟随)
+function applyFavorite(f) {
+  const c = f.config || {}
+  instance.value = c.instance ?? ''
+  selected.value = Array.isArray(c.metrics) ? [...c.metrics] : []
+  rangeSec.value = c.range_sec ?? rangeSec.value
+  agg.value = c.agg ?? 'avg'
+  onQuery()
+  showFavTip(`已应用「${f.name}」`)
+}
+
+function startRename(f) {
+  editingId.value = f.id
+  editingName.value = f.name
+}
+
+async function renameFavorite(f) {
+  const name = editingName.value.trim()
+  editingId.value = null
+  if (!name || name === f.name) return
+  const r = await fetch(`${API}/api/favorites/${f.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (r.status === 409) { showFavTip('名称已存在, 请换一个'); return }
+  if (!r.ok) { showFavTip('改名失败'); return }
+  await loadFavorites()
+}
+
+async function removeFavorite(f) {
+  if (!confirm(`确定删除收藏「${f.name}」?`)) return
+  await fetch(`${API}/api/favorites/${f.id}`, { method: 'DELETE' })
+  await loadFavorites()
+}
+
+// 收藏条目的摘要: 指标集 · 时间范围 · 聚合方式
+function favSummary(f) {
+  const c = f.config || {}
+  const range = ranges.find(r => r.sec === c.range_sec)
+  const parts = [
+    (c.metrics || []).join(', ') || '(无指标)',
+    range ? range.label : `${c.range_sec}s`,
+    (c.agg || '').toUpperCase(),
+  ]
+  if (c.instance) parts.push(`实例: ${c.instance}`)
+  return parts.join(' · ')
+}
 
 // ---------- 历史查询: 多指标对比 + 降采样 ----------
 async function onQuery() {
@@ -293,6 +422,7 @@ onMounted(async () => {
   await loadMetrics()
   await onQuery()
   scheduleLive()
+  loadFavorites()
   // 指标列表每 10 秒刷新一次统计
   setInterval(loadMetrics, 10000)
 })
@@ -300,5 +430,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   clearInterval(liveTimer)
   clearInterval(liveAnomalyTimer)
+  clearTimeout(favTipTimer)
 })
 </script>

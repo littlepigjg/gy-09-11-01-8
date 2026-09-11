@@ -8,6 +8,7 @@
 #   4. 自动路由: 大时间跨度查询命中小时级预聚合表
 #   5. 异常点检测: 基于滑动窗口 Z-Score
 # =============================================================
+import json
 import math
 import os
 import time
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import pymysql
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -94,6 +95,38 @@ def health():
 
 
 # ---------------------------------------------------------------
+# 收藏表: schema.sql 仅在全新数据卷初始化时执行, 这里在启动时幂等建表,
+# 保证存量部署升级后无需手动迁移
+# ---------------------------------------------------------------
+FAVORITE_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS query_favorites (
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    name       VARCHAR(64)  NOT NULL COMMENT '收藏名称',
+    config     JSON         NOT NULL COMMENT '查询条件组合: instance/metrics/range_sec/agg',
+    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_name (name)
+) ENGINE=InnoDB COMMENT='查询条件收藏'
+"""
+
+
+@app.on_event("startup")
+def ensure_favorite_table():
+    # MySQL 尚未就绪时短暂重试 (容器编排已保证 healthy, 这里兜底本地开发场景)
+    last_err: Optional[Exception] = None
+    for _ in range(10):
+        try:
+            with pool.acquire() as conn, conn.cursor() as cur:
+                cur.execute(FAVORITE_TABLE_DDL)
+            return
+        except Exception as e:
+            last_err = e
+            time.sleep(3)
+    raise last_err
+
+
+# ---------------------------------------------------------------
 # 请求模型
 # ---------------------------------------------------------------
 class DataPoint(BaseModel):
@@ -105,6 +138,15 @@ class DataPoint(BaseModel):
 
 class BatchWriteRequest(BaseModel):
     points: list[DataPoint]
+
+
+class FavoriteIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64, description="收藏名称")
+    config: dict = Field(..., description="查询条件组合, 如 {instance, metrics, range_sec, agg}")
+
+
+class FavoriteRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=64, description="新名称")
 
 
 # ---------------------------------------------------------------
@@ -345,6 +387,81 @@ def detect_anomalies(
             if z > threshold:
                 anomalies.append({"ts": int(r["ts"]), "value": r["value"], "zscore": round(z, 2)})
     return {"anomalies": anomalies}
+
+
+# ---------------------------------------------------------------
+# API: 查询条件收藏 (增删改查)
+#   收藏内容 = 一组查询条件 (实例/指标集/时间范围/聚合方式),
+#   前端保存后可一键恢复, 名称唯一便于团队成员各自维护常用组合
+# ---------------------------------------------------------------
+def _row_to_favorite(row: dict) -> dict:
+    """pymysql 对 JSON 列返回字符串, 这里统一解析为 dict。"""
+    config = row["config"]
+    if isinstance(config, (str, bytes)):
+        config = json.loads(config)
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "config": config,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def _get_favorite(cursor, fav_id: int) -> dict:
+    cursor.execute(
+        "SELECT id, name, config, created_at, updated_at FROM query_favorites WHERE id=%s",
+        (fav_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="收藏不存在")
+    return _row_to_favorite(row)
+
+
+@app.get("/api/favorites")
+def list_favorites():
+    """收藏列表, 按最近更新排序。"""
+    with pool.acquire() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, name, config, created_at, updated_at "
+            "FROM query_favorites ORDER BY updated_at DESC, id DESC"
+        )
+        return [_row_to_favorite(r) for r in cur.fetchall()]
+
+
+@app.post("/api/favorites", status_code=201)
+def create_favorite(req: FavoriteIn):
+    """保存当前查询条件组合并命名。名称重复返回 409。"""
+    try:
+        with pool.acquire() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO query_favorites (name, config) VALUES (%s, %s)",
+                (req.name, json.dumps(req.config, ensure_ascii=False)),
+            )
+            return _get_favorite(cur, cur.lastrowid)
+    except pymysql.err.IntegrityError:
+        raise HTTPException(status_code=409, detail="同名收藏已存在")
+
+
+@app.put("/api/favorites/{fav_id}")
+def rename_favorite(fav_id: int, req: FavoriteRename):
+    """编辑收藏名称。"""
+    with pool.acquire() as conn, conn.cursor() as cur:
+        try:
+            cur.execute("UPDATE query_favorites SET name=%s WHERE id=%s", (req.name, fav_id))
+        except pymysql.err.IntegrityError:
+            raise HTTPException(status_code=409, detail="同名收藏已存在")
+        return _get_favorite(cur, fav_id)
+
+
+@app.delete("/api/favorites/{fav_id}")
+def delete_favorite(fav_id: int):
+    with pool.acquire() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM query_favorites WHERE id=%s", (fav_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="收藏不存在")
+    return {"deleted": fav_id}
 
 
 if __name__ == "__main__":

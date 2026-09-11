@@ -56,6 +56,20 @@ CREATE TABLE IF NOT EXISTS metric_data_hourly (
 ) ENGINE=InnoDB COMMENT='小时级预聚合(降采样)';
 
 -- ---------------------------------------------------------------
+-- 查询条件收藏表: 保存用户常用的查询条件组合 (实例/指标集/时间范围/聚合),
+-- 后端启动时也会幂等建表 (兼容存量数据卷升级)
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS query_favorites (
+    id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    name       VARCHAR(64)  NOT NULL COMMENT '收藏名称',
+    config     JSON         NOT NULL COMMENT '查询条件组合: instance/metrics/range_sec/agg',
+    created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_name (name)
+) ENGINE=InnoDB COMMENT='查询条件收藏';
+
+-- ---------------------------------------------------------------
 -- 存储过程: 分区维护
 --   p_add_partition: 追加未来 N 天的分区
 --   p_drop_old_partitions: 删除 retention_days 之前的分区(数据过期)

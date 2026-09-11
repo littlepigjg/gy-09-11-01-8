@@ -90,3 +90,49 @@ button.primary { background: linear-gradient(90deg, #1565c0, #4527a0); border: n
 .meta .hl { color: #4fc3f7; }
 
 .legend-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+
+/* ---------- 查询条件收藏面板 ---------- */
+input {
+  background: #1e2940;
+  color: #d7dde8;
+  border: 1px solid #31405e;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+input:focus { border-color: #4fc3f7; }
+
+.fav-panel {
+  background: #161d2c;
+  border: 1px solid #26314a;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+}
+.fav-save { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.fav-save input { width: 280px; }
+.fav-tip { font-size: 12px; color: #4fc3f7; }
+.fav-empty { font-size: 13px; color: #5c6880; padding: 6px 0; }
+
+.fav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid #1d273b;
+}
+.fav-item .fav-name { font-size: 13px; font-weight: 600; color: #d7dde8; white-space: nowrap; }
+.fav-item .fav-desc {
+  flex: 1;
+  font-size: 12px;
+  color: #5c6880;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-item .fav-ops { display: flex; gap: 6px; }
+.fav-item .fav-ops button { padding: 3px 10px; font-size: 12px; }
+.fav-edit { display: flex; align-items: center; gap: 8px; }
+button.danger:hover { border-color: #ff5252; color: #ff5252; }

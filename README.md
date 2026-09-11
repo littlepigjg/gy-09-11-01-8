@@ -11,6 +11,7 @@
 - **预聚合加速**：小时级物化表，跨度 >7 天查询自动路由，30 天查询毫秒级返回
 - **异常点检测**：滑动窗口 Z-Score 算法，曲线上红色高亮标注
 - **实时可视化**：实时曲线、多指标对比、时间范围/聚合方式切换、图表缩放
+- **查询条件收藏**：常用查询组合（实例/指标集/时间范围/聚合方式）命名保存、一键恢复，支持改名与删除
 
 ## 快速开始
 
@@ -106,6 +107,10 @@ tsdb/
 | GET | `/api/query` | 聚合 + 降采样查询（`metrics/start/end/agg/bucket`） |
 | GET | `/api/latest` | 最近窗口原始点（实时曲线） |
 | GET | `/api/anomalies` | 滑动窗口 Z-Score 异常点检测 |
+| GET | `/api/favorites` | 查询条件收藏列表 |
+| POST | `/api/favorites` | 保存查询条件组合（`name` + `config`，名称唯一） |
+| PUT | `/api/favorites/{id}` | 编辑收藏名称 |
+| DELETE | `/api/favorites/{id}` | 删除收藏 |
 | GET | `/api/health` | 健康检查 |
 
 写入示例：
