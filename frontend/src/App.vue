@@ -61,15 +61,22 @@
           maxlength="64"
           @keyup.enter="saveFavorite"
         />
-        <button class="primary" @click="saveFavorite">保存当前查询</button>
+        <button class="primary" :disabled="saving" @click="saveFavorite">{{ saving ? '保存中…' : '保存当前查询' }}</button>
         <span v-if="favTip" class="fav-tip">{{ favTip }}</span>
       </div>
       <div v-if="!favorites.length" class="fav-empty">暂无收藏, 配置好查询条件后点击「保存当前查询」</div>
       <div v-for="f in favorites" :key="f.id" class="fav-item">
         <div v-if="editingId === f.id" class="fav-edit">
-          <input v-model="editingName" maxlength="64" @keyup.enter="renameFavorite(f)" @keyup.esc="editingId = null" />
-          <button @click="renameFavorite(f)">确定</button>
-          <button @click="editingId = null">取消</button>
+          <input
+            v-model="editingName"
+            maxlength="64"
+            :disabled="renaming"
+            @keyup.enter="renameFavorite(f)"
+            @keyup.esc="cancelRename"
+          />
+          <button :disabled="renaming" @click="renameFavorite(f)">{{ renaming ? '保存中…' : '确定' }}</button>
+          <button :disabled="renaming" @click="cancelRename">取消</button>
+          <span v-if="editError" class="fav-error">{{ editError }}</span>
         </div>
         <template v-else>
           <span class="fav-name">{{ f.name }}</span>
@@ -173,6 +180,9 @@ const favName = ref('')
 const favTip = ref('')
 const editingId = ref(null)
 const editingName = ref('')
+const editError = ref('')
+const renaming = ref(false)
+const saving = ref(false)
 let favTipTimer = null
 
 function showFavTip(t) {
@@ -203,16 +213,27 @@ function currentConfig() {
 async function saveFavorite() {
   const name = favName.value.trim()
   if (!name) { showFavTip('请输入收藏名称'); return }
-  const r = await fetch(API + '/api/favorites', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, config: currentConfig() }),
-  })
-  if (r.status === 409) { showFavTip('名称已存在, 请换一个'); return }
-  if (!r.ok) { showFavTip('保存失败'); return }
-  favName.value = ''
-  showFavTip(`已保存「${name}」`)
-  await loadFavorites()
+  saving.value = true
+  try {
+    const r = await fetch(API + '/api/favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, config: currentConfig() }),
+    })
+    if (r.ok) {
+      favName.value = ''
+      showFavTip(`已保存「${name}」`)
+      await loadFavorites()
+    } else if (r.status === 409) {
+      showFavTip('名称已存在, 请换一个')
+    } else {
+      showFavTip('保存失败, 请稍后重试')
+    }
+  } catch (e) {
+    showFavTip('网络异常, 保存未生效')
+  } finally {
+    saving.value = false
+  }
 }
 
 // 一键恢复: 回填工具栏条件并触发查询 (实时轮询定时器引用的是 ref, 自动跟随)
@@ -229,25 +250,62 @@ function applyFavorite(f) {
 function startRename(f) {
   editingId.value = f.id
   editingName.value = f.name
+  editError.value = ''
 }
 
+function cancelRename() {
+  editingId.value = null
+  editError.value = ''
+}
+
+// 改名: 成功才关闭输入框; 失败时输入框保持打开并内联显示原因, 用户可直接修正重试
 async function renameFavorite(f) {
   const name = editingName.value.trim()
-  editingId.value = null
-  if (!name || name === f.name) return
-  const r = await fetch(`${API}/api/favorites/${f.id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name }),
-  })
-  if (r.status === 409) { showFavTip('名称已存在, 请换一个'); return }
-  if (!r.ok) { showFavTip('改名失败'); return }
-  await loadFavorites()
+  if (!name) { editError.value = '名称不能为空'; return }
+  if (name === f.name) { cancelRename(); return } // 未修改, 直接关闭
+  renaming.value = true
+  editError.value = ''
+  try {
+    const r = await fetch(`${API}/api/favorites/${f.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    if (r.ok) {
+      cancelRename()
+      showFavTip(`已改名为「${name}」`)
+      await loadFavorites()
+    } else if (r.status === 409) {
+      editError.value = '名称已存在, 请换一个'
+    } else if (r.status === 404) {
+      // 收藏已被其他人删除: 关闭编辑框并刷新列表
+      cancelRename()
+      showFavTip('该收藏已不存在, 列表已刷新')
+      await loadFavorites()
+    } else {
+      editError.value = '改名失败, 请稍后重试'
+    }
+  } catch (e) {
+    editError.value = '网络异常, 改名未生效'
+  } finally {
+    renaming.value = false
+  }
 }
 
 async function removeFavorite(f) {
   if (!confirm(`确定删除收藏「${f.name}」?`)) return
-  await fetch(`${API}/api/favorites/${f.id}`, { method: 'DELETE' })
+  try {
+    const r = await fetch(`${API}/api/favorites/${f.id}`, { method: 'DELETE' })
+    if (r.ok) {
+      showFavTip(`已删除「${f.name}」`)
+    } else if (r.status === 404) {
+      showFavTip('该收藏已不存在, 列表已刷新')
+    } else {
+      showFavTip('删除失败, 请稍后重试')
+    }
+  } catch (e) {
+    showFavTip('网络异常, 删除未生效')
+  }
   await loadFavorites()
 }
 

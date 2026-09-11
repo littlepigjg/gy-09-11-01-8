@@ -446,8 +446,13 @@ def create_favorite(req: FavoriteIn):
 
 @app.put("/api/favorites/{fav_id}")
 def rename_favorite(fav_id: int, req: FavoriteRename):
-    """编辑收藏名称。"""
+    """编辑收藏名称。收藏不存在返回 404, 名称与其他收藏重复返回 409。"""
     with pool.acquire() as conn, conn.cursor() as cur:
+        # 先显式校验存在性: 404 语义清晰, 不依赖 UPDATE 的 affected_rows
+        # (MySQL 对"值未变化"的 UPDATE 也返回 0, 无法用于判断行是否存在)
+        cur.execute("SELECT 1 FROM query_favorites WHERE id=%s", (fav_id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="收藏不存在")
         try:
             cur.execute("UPDATE query_favorites SET name=%s WHERE id=%s", (req.name, fav_id))
         except pymysql.err.IntegrityError:
